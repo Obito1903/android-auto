@@ -38,14 +38,14 @@ impl TryFrom<&AndroidAutoFrame> for MediaStatusMessage {
         if let Some(sys) = Wifi::media_info_channel_message::Enum::from_i32(ty as i32) {
             match sys {
                 Wifi::media_info_channel_message::Enum::PLAYBACK => {
-                    let m = Wifi::MediaInfoChannelPlaybackData::parse_from_bytes(&value.data);
+                    let m = Wifi::MediaInfoChannelPlaybackData::parse_from_bytes(&value.data[2..]);
                     match m {
                         Ok(m) => Ok(Self::Playback(value.header.channel_id, m)),
                         Err(_) => Ok(Self::Invalid),
                     }
                 }
                 Wifi::media_info_channel_message::Enum::METADATA => {
-                    let m = Wifi::MediaInfoChannelMetadataData::parse_from_bytes(&value.data);
+                    let m = Wifi::MediaInfoChannelMetadataData::parse_from_bytes(&value.data[2..]);
                     match m {
                         Ok(m) => Ok(Self::Metadata(value.header.channel_id, m)),
                         Err(_) => Ok(Self::Invalid),

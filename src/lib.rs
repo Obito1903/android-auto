@@ -161,6 +161,8 @@ pub enum ClientError {
     IoError(FrameIoError),
     /// An ssl error
     SslError(tokio::sync::mpsc::error::SendError<ssl::SslThreadData>),
+    /// The ssl worker thread exited with an error
+    SslThreadExit(String),
 }
 
 impl From<tokio::sync::mpsc::error::SendError<ssl::SslThreadData>> for ClientError {
@@ -1882,8 +1884,8 @@ async fn do_android_auto_loop<T: AndroidAutoMainTrait + ?Sized>(
                     log::info!("SSL Handshake complete");
                 }
                 SslThreadResponse::ExitError(e) => {
-                    log::error!("The error for exit is {}", e);
-                    todo!();
+                    log::error!("The ssl thread exited with an error: {}", e);
+                    return Err(ClientError::SslThreadExit(e));
                 }
             }
         }
