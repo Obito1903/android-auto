@@ -485,7 +485,11 @@ impl ChannelHandlerTrait for ControlChannelHandler {
                 }
             }
         } else {
-            todo!("{:?} {:x?}", msg2.err(), msg);
+            log::warn!(
+                "Ignoring unparseable control message ({}): {:x?}",
+                msg2.err().unwrap_or_default(),
+                msg
+            );
         }
         Ok(())
     }
