@@ -55,8 +55,8 @@ impl ChannelHandlerTrait for VideoChannelHandler {
             vc.set_video_resolution(vcs.resolution);
             vc.set_video_fps(vcs.fps);
             vc.set_dpi(vcs.dpi as u32);
-            vc.set_margin_height(0);
-            vc.set_margin_width(0);
+            vc.set_margin_height(vcs.margin_height as u32);
+            vc.set_margin_width(vcs.margin_width as u32);
             if !vc.is_initialized() {
                 panic!();
             }

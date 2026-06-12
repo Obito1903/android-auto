@@ -879,6 +879,12 @@ pub struct VideoConfiguration {
     pub fps: Wifi::video_fps::Enum,
     /// The dots per inch of the display
     pub dpi: u16,
+    /// Horizontal margin (in pixels) subtracted from the base resolution so the
+    /// active picture matches the head unit's aspect ratio.
+    pub margin_width: u16,
+    /// Vertical margin (in pixels) subtracted from the base resolution so the
+    /// active picture matches the head unit's aspect ratio.
+    pub margin_height: u16,
 }
 
 /// Provides basic configuration elements for setting up an android auto head unit

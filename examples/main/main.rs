@@ -521,6 +521,8 @@ impl AndroidAuto {
                 resolution: android_auto::Wifi::video_resolution::Enum::_480p,
                 fps: android_auto::Wifi::video_fps::Enum::_30,
                 dpi: 111,
+                margin_width: 0,
+                margin_height: 0,
             },
             sensors: android_auto::SensorInformation { sensors: s },
             input_config: android_auto::InputConfiguration {
