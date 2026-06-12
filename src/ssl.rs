@@ -38,10 +38,6 @@ struct SslStreamThread<U: AsyncWrite + Unpin> {
     hs: Option<tokio::sync::mpsc::Receiver<SslThreadData>>,
     dout: tokio::sync::mpsc::Sender<SslThreadResponse>,
     write: U,
-    /// Encrypted frames that arrived before the TLS handshake completed. They
-    /// are flushed once the handshake is done, because rustls cannot encrypt
-    /// application data until it has session keys.
-    pending: Vec<AndroidAutoFrame>,
 }
 
 impl<U: AsyncWrite + Unpin> SslStreamThread<U> {
@@ -58,15 +54,21 @@ impl<U: AsyncWrite + Unpin> SslStreamThread<U> {
             hs: Some(rcv),
             dout,
             write,
-            pending: Vec::new(),
         }
     }
 
-    /// Write a frame to the wire, or queue it if it requires encryption but the
-    /// TLS handshake has not completed yet.
-    async fn send_or_queue(&mut self, f: AndroidAutoFrame) -> Result<(), String> {
+    /// Write a frame to the wire, discarding it if it requires encryption but
+    /// the TLS handshake has not completed yet. rustls has no session keys
+    /// before the handshake finishes, so such a frame cannot be encrypted.
+    /// Discarding (rather than queuing) avoids sending application data ahead
+    /// of the `SslAuthComplete` control message, which would violate the
+    /// protocol. Discarded frames (e.g. periodic sensor data) are re-sent later.
+    async fn send_or_discard(&mut self, f: AndroidAutoFrame) -> Result<(), String> {
         if f.header.frame.get_encryption() && !self.hs_completed {
-            self.pending.push(f);
+            log::debug!(
+                "Discarding encrypted frame on channel {} before handshake completion",
+                f.header.channel_id
+            );
             return Ok(());
         }
         self.write_frame_now(f).await
@@ -86,15 +88,6 @@ impl<U: AsyncWrite + Unpin> SslStreamThread<U> {
         });
         let _ = self.write.flush().await;
         a.map_err(|e| format!("{:?}", e))
-    }
-
-    /// Flush any frames that were queued while the handshake was in progress.
-    async fn flush_pending(&mut self) -> Result<(), String> {
-        let pending = std::mem::take(&mut self.pending);
-        for f in pending {
-            self.write_frame_now(f).await?;
-        }
-        Ok(())
     }
 
     async fn handle_receive(&mut self, m: SslThreadData) -> Result<(), String> {
@@ -156,7 +149,6 @@ impl<U: AsyncWrite + Unpin> SslStreamThread<U> {
                         .send(SslThreadResponse::HandshakeComplete)
                         .await
                         .map_err(|e| e.to_string())?;
-                    self.flush_pending().await?;
                 }
 
                 if self.stream.wants_write() {
@@ -185,10 +177,10 @@ impl<U: AsyncWrite + Unpin> SslStreamThread<U> {
             }
             SslThreadData::PlainData(f) => {
                 let frame = f.into_frame().await;
-                self.send_or_queue(frame).await?;
+                self.send_or_discard(frame).await?;
             }
             SslThreadData::Frame(f) => {
-                self.send_or_queue(f).await?;
+                self.send_or_discard(f).await?;
             }
         }
         Ok(())
