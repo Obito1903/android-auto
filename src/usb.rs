@@ -8,7 +8,11 @@ enum AoaStringIndex {
     SerialNumber = 5,
 }
 
-async fn send_aoa_string(device: &nusb::Device, index: u16, value: &str) {
+async fn send_aoa_string(
+    device: &nusb::Device,
+    index: u16,
+    value: &str,
+) -> Result<(), nusb::transfer::TransferError> {
     device
         .control_out(
             nusb::transfer::ControlOut {
@@ -21,20 +25,25 @@ async fn send_aoa_string(device: &nusb::Device, index: u16, value: &str) {
             },
             std::time::Duration::from_millis(1000),
         )
-        .await
-        .unwrap();
+        .await?;
+    Ok(())
 }
 
-pub async fn identify_accessory(device: &nusb::Device) {
-    send_aoa_string(device, AoaStringIndex::Manufacturer as u16, "Android").await;
-    send_aoa_string(device, AoaStringIndex::Model as u16, "Android Auto").await;
-    send_aoa_string(device, AoaStringIndex::Description as u16, "Android Auto").await;
-    send_aoa_string(device, AoaStringIndex::Version as u16, "2.0.1").await;
-    send_aoa_string(device, AoaStringIndex::Uri as u16, "").await;
-    send_aoa_string(device, AoaStringIndex::SerialNumber as u16, "HU-AAAAAA").await;
+pub async fn identify_accessory(
+    device: &nusb::Device,
+) -> Result<(), nusb::transfer::TransferError> {
+    send_aoa_string(device, AoaStringIndex::Manufacturer as u16, "Android").await?;
+    send_aoa_string(device, AoaStringIndex::Model as u16, "Android Auto").await?;
+    send_aoa_string(device, AoaStringIndex::Description as u16, "Android Auto").await?;
+    send_aoa_string(device, AoaStringIndex::Version as u16, "2.0.1").await?;
+    send_aoa_string(device, AoaStringIndex::Uri as u16, "").await?;
+    send_aoa_string(device, AoaStringIndex::SerialNumber as u16, "HU-AAAAAA").await?;
+    Ok(())
 }
 
-pub async fn accessory_start(device: &nusb::Device) {
+pub async fn accessory_start(
+    device: &nusb::Device,
+) -> Result<(), nusb::transfer::TransferError> {
     device
         .control_out(
             nusb::transfer::ControlOut {
@@ -47,8 +56,8 @@ pub async fn accessory_start(device: &nusb::Device) {
             },
             std::time::Duration::from_millis(1000),
         )
-        .await
-        .unwrap();
+        .await?;
+    Ok(())
 }
 
 pub async fn wait_for_accessory() -> Result<nusb::Device, nusb::Error> {

@@ -175,8 +175,11 @@ impl<U: AsyncWrite + Unpin> SslStreamThread<U> {
                 }
             }
             SslThreadData::PlainData(f) => {
-                let frame = f.into_frame().await;
-                self.send_or_discard(frame).await?;
+                if let Some(frame) = f.into_frame().await {
+                    self.send_or_discard(frame).await?;
+                } else {
+                    log::warn!("Dropping message: no matching channel handler available yet");
+                }
             }
             SslThreadData::Frame(f) => {
                 self.send_or_discard(f).await?;

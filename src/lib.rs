@@ -301,8 +301,14 @@ pub trait AndroidAutoMainTrait:
             Ok(d) => {
                 let aoa = usb::get_aoa_protocol(&d).await;
                 log::info!("AOA is {:?}", aoa);
-                usb::identify_accessory(&d).await;
-                usb::accessory_start(&d).await;
+                if let Err(e) = usb::identify_accessory(&d).await {
+                    log::error!("Failed to identify accessory: {e:?}");
+                    return Err(());
+                }
+                if let Err(e) = usb::accessory_start(&d).await {
+                    log::error!("Failed to start accessory: {e:?}");
+                    return Err(());
+                }
             }
             Err(e) => {
                 log::error!("Failed to open android device {e}");
@@ -702,7 +708,7 @@ pub struct SendableAndroidAutoMessage {
 
 impl SendableAndroidAutoMessage {
     /// Convert Self into an `AndroidAutoFrame``
-    async fn into_frame(self) -> AndroidAutoFrame {
+    async fn into_frame(self) -> Option<AndroidAutoFrame> {
         let mut chan = None;
         let chans = CHANNEL_HANDLERS.read().await;
         for (i, c) in chans.iter().enumerate() {
@@ -730,13 +736,14 @@ impl SendableAndroidAutoMessage {
                 }
             }
         }
-        AndroidAutoFrame {
+        let chan = chan?;
+        Some(AndroidAutoFrame {
             header: FrameHeader {
-                channel_id: chan.unwrap(),
+                channel_id: chan,
                 frame: FrameHeaderContents::new(true, FrameHeaderType::Single, false),
             },
             data: self.data,
-        }
+        })
     }
 }
 
