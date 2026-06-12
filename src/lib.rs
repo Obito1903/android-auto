@@ -1888,6 +1888,13 @@ async fn do_android_auto_loop<T: AndroidAutoMainTrait + ?Sized>(
                     return Err(ClientError::SslThreadExit(e));
                 }
             }
+        } else {
+            // The SSL response channel closed: the reader/SSL thread is gone,
+            // so the connection is dead. Return instead of busy-looping.
+            log::info!("SSL response channel closed, ending android auto loop");
+            return Err(ClientError::SslThreadExit(
+                "ssl response channel closed".to_string(),
+            ));
         }
     }
 }

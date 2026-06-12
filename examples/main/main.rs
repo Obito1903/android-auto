@@ -892,8 +892,7 @@ impl Drop for AndroidAutoContainer {
 
 fn main() -> Result<(), u32> {
     simple_logger::SimpleLogger::new()
-        .with_level(log::LevelFilter::Debug)
-        .with_module_level("nusb", log::LevelFilter::Warn)
+        .with_level(log::LevelFilter::Info)
         .init()
         .unwrap();
     let native_options = eframe::NativeOptions::default();

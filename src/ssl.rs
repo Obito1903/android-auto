@@ -273,13 +273,33 @@ impl StreamMux {
             let mut fr = AndroidAutoFrameReceiver::new();
             loop {
                 let mut fhr = FrameHeaderReceiver::new();
-                if let Ok(Some(fh)) = fhr.read(&mut read).await {
-                    if let Ok(Some(f)) = fr.read(&fh, &mut read).await {
-                        if f.header.frame.get_encryption() {
-                            let _ = chan_ssl.send(SslThreadData::DecryptMe(f)).await;
-                        } else {
-                            let _ = chanw.send(SslThreadResponse::Data(f));
+                match fhr.read(&mut read).await {
+                    Ok(Some(fh)) => match fr.read(&fh, &mut read).await {
+                        Ok(Some(f)) => {
+                            if f.header.frame.get_encryption() {
+                                let _ = chan_ssl.send(SslThreadData::DecryptMe(f)).await;
+                            } else {
+                                let _ = chanw.send(SslThreadResponse::Data(f));
+                            }
                         }
+                        Ok(None) => {}
+                        Err(e) => {
+                            // The connection went away (EOF/disconnect) or
+                            // produced an unrecoverable read error. Propagate it
+                            // so the protocol loop can tear down instead of
+                            // spinning forever on a dead stream.
+                            log::info!("Reader task stopping: {:?}", e);
+                            let _ = chanw
+                                .send(SslThreadResponse::ExitError(format!("read error: {:?}", e)));
+                            break;
+                        }
+                    },
+                    Ok(None) => {}
+                    Err(e) => {
+                        log::info!("Reader task stopping: {:?}", e);
+                        let _ = chanw
+                            .send(SslThreadResponse::ExitError(format!("read error: {:?}", e)));
+                        break;
                     }
                 }
             }
