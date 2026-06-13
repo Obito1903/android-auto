@@ -472,7 +472,7 @@ pub trait AndroidAutoMainTrait:
                                 e
                             }
                             _ = kill.1 => {
-                                log::error!("Kill bluetooth service");
+                                log::debug!("Kill bluetooth service");
                                 Ok(())
                             }
                         }
@@ -514,11 +514,11 @@ pub trait AndroidAutoMainTrait:
 
         let (d, abort, kill) = tokio::select! {
             a = self.usb_run(&config, setup) => {
-                log::error!("usb config finished");
+                log::info!("usb config finished");
                 a
             }
             b = self.wifi_run(&config, setup) => {
-                log::error!("wifi config finished");
+                log::info!("wifi config finished");
                 b
             }
         };
@@ -1930,7 +1930,7 @@ async fn handle_client_generic<
         {
             let mut ch = CHANNEL_HANDLERS.write().await;
             ch.clear();
-            log::error!(
+            log::debug!(
                 "Adding {} channels to CHANNEL_HANDLERS",
                 channel_handlers.len()
             );

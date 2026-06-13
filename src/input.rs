@@ -106,7 +106,7 @@ impl ChannelHandlerTrait for InputChannelHandler {
             ichan.touch_screen_config.0.replace(Box::new(tc));
         }
         for c in &ics.keycodes {
-            log::error!("Keycode {} added", c);
+            log::debug!("Keycode {} added", c);
             ichan.supported_keycodes.push(*c);
         }
         chan.input_channel.0.replace(Box::new(ichan));
