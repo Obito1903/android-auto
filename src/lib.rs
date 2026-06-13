@@ -1661,6 +1661,11 @@ async fn handle_bluetooth_client(
 }
 
 #[cfg(feature = "wireless")]
+/// Maximum time allowed for the Bluetooth socket/network negotiation with a
+/// phone before the client is dropped.
+const BT_NEGOTIATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[cfg(feature = "wireless")]
 /// Runs the bluetooth service that allows wireless android auto connections to start up
 async fn bluetooth_service(
     mut profile: bluetooth_rust::BluetoothRfcommProfileAsync,
@@ -1673,8 +1678,21 @@ async fn bluetooth_service(
             use bluetooth_rust::BluetoothRfcommConnectableAsyncTrait;
             let mut stream =
                 bluetooth_rust::BluetoothRfcommConnectableAsyncTrait::accept(c).await?;
-            let e = handle_bluetooth_client(&mut stream.0, &network2).await;
-            log::info!("Bluetooth client disconnected: {:?}", e);
+            // Bound the negotiation: a phone that connects over RFCOMM but never
+            // finishes the socket/network exchange must not hang this task
+            // forever.
+            match tokio::time::timeout(
+                BT_NEGOTIATION_TIMEOUT,
+                handle_bluetooth_client(&mut stream.0, &network2),
+            )
+            .await
+            {
+                Ok(e) => log::info!("Bluetooth client disconnected: {:?}", e),
+                Err(_) => log::warn!(
+                    "Bluetooth negotiation timed out after {:?}; dropping client",
+                    BT_NEGOTIATION_TIMEOUT
+                ),
+            }
         }
     }
 }
@@ -1701,6 +1719,27 @@ async fn wifi_service<T: AndroidAutoWirelessTrait + Send + ?Sized>(
     } else {
         Err(format!("Failed to listen on port {} tcp", network.port))
     }
+}
+
+/// Interval between keep-alive pings sent to the connected phone.
+const PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Maximum time without a ping response before the connection is considered
+/// dead. Generous enough (several missed pings) to avoid false positives on a
+/// briefly busy link, but short enough to recover from a frozen phone quickly.
+const PING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Maximum time allowed for the SSL/version handshake to complete before the
+/// connection is abandoned.
+const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Current time as microseconds since the Unix epoch, saturating to 0 if the
+/// system clock is set before the epoch.
+fn now_epoch_micros() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(0)
 }
 
 /// Handle a single android auto device for a head unit
@@ -1772,6 +1811,21 @@ async fn handle_client_generic<
     let sm2 = sm.1.clone();
     let kill = tokio::sync::oneshot::channel::<()>();
     let kill2 = tokio::sync::oneshot::channel::<()>();
+
+    // ── Connection watchdogs ──────────────────────────────────────────────
+    // `last_pong` is updated by the control channel whenever a ping response
+    // arrives; the keep-alive task uses it to detect an unresponsive phone.
+    // It is seeded with the current time so the timeout is measured from the
+    // start of the connection rather than firing immediately.
+    let last_pong = Arc::new(std::sync::atomic::AtomicU64::new(now_epoch_micros()));
+    // Set once the SSL handshake completes; the handshake watchdog tears the
+    // connection down if this never happens within HANDSHAKE_TIMEOUT.
+    let handshake_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Each watchdog signals on its own oneshot when it decides the connection
+    // is dead (oneshot senders cannot be shared between the two tasks).
+    let ping_watchdog = tokio::sync::oneshot::channel::<()>();
+    let handshake_watchdog = tokio::sync::oneshot::channel::<()>();
+
     let _task2 = if let Some(mut msgr) = message_recv {
         let jh: tokio::task::JoinHandle<
             Result<(), tokio::sync::mpsc::error::SendError<SslThreadData>>,
@@ -1791,22 +1845,36 @@ async fn handle_client_generic<
     };
 
     let sm3 = sm.1.clone();
+    let ping_last_pong = last_pong.clone();
+    let ping_watchdog_tx = ping_watchdog.0;
     tokio::spawn(async move {
         tokio::select! {
-            _ = async {
+            _ = async move {
                 loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    tokio::time::sleep(PING_INTERVAL).await;
+                    // If the phone has not answered a ping within the timeout
+                    // window the link is dead (frozen app, dropped wifi, …).
+                    // Signal the main loop to tear the connection down instead
+                    // of waiting for a TCP error that may never come.
+                    let now = now_epoch_micros();
+                    let last = ping_last_pong.load(std::sync::atomic::Ordering::Relaxed);
+                    if now.saturating_sub(last) > PING_TIMEOUT.as_micros() as u64 {
+                        log::error!(
+                            "Ping watchdog: no ping response in {:?}; \
+                             declaring the connection dead",
+                            PING_TIMEOUT
+                        );
+                        let _ = ping_watchdog_tx.send(());
+                        break;
+                    }
                     let mut m = Wifi::PingRequest::new();
-                    let timestamp = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_micros() as i64;
-                    m.set_timestamp(timestamp);
+                    m.set_timestamp(now as i64);
                     if let Err(e) = sm3
                         .write_frame(AndroidAutoControlMessage::PingRequest(m).into())
-                        .await {
-                            log::error!("Error sending ping request {:?}", e);
-                        }
+                        .await
+                    {
+                        log::error!("Error sending ping request {:?}", e);
+                    }
                 }
             } => {}
             _ = kill2.1 => {
@@ -1815,10 +1883,27 @@ async fn handle_client_generic<
         log::info!("Exiting pinger");
     });
 
+    // Handshake watchdog: if the SSL/version handshake does not complete in
+    // time, signal the main loop to abandon the connection so a stalled phone
+    // cannot hang the worker indefinitely.
+    let handshake_done_wd = handshake_done.clone();
+    let handshake_watchdog_tx = handshake_watchdog.0;
+    tokio::spawn(async move {
+        tokio::time::sleep(HANDSHAKE_TIMEOUT).await;
+        if !handshake_done_wd.load(std::sync::atomic::Ordering::Relaxed) {
+            log::error!(
+                "Handshake watchdog: SSL/version handshake did not complete \
+                 within {:?}; closing the connection",
+                HANDSHAKE_TIMEOUT
+            );
+            let _ = handshake_watchdog_tx.send(());
+        }
+    });
+
     log::info!("Sending channel handlers");
     {
         let mut channel_handlers: Vec<ChannelHandler> = Vec::new();
-        channel_handlers.push(ControlChannelHandler::new().into());
+        channel_handlers.push(ControlChannelHandler::new(last_pong.clone()).into());
         channel_handlers.push(InputChannelHandler {}.into());
         channel_handlers.push(SensorChannelHandler {}.into());
         channel_handlers.push(VideoChannelHandler::new().into());
@@ -1863,11 +1948,17 @@ async fn handle_client_generic<
     log::debug!("Waiting on first packet from android auto client");
 
     tokio::select! {
-        a = do_android_auto_loop(channel_handlers, sm.0, &sm.1, config, main) => {
+        a = do_android_auto_loop(channel_handlers, sm.0, &sm.1, config, main, handshake_done) => {
 
         }
         _ = kill.1 => {
 
+        }
+        _ = ping_watchdog.1 => {
+            log::error!("Ping watchdog fired; closing android auto connection");
+        }
+        _ = handshake_watchdog.1 => {
+            log::error!("Handshake watchdog fired; closing android auto connection");
         }
     }
     kill2.0.send(());
@@ -1880,6 +1971,7 @@ async fn do_android_auto_loop<T: AndroidAutoMainTrait + ?Sized>(
     sr: &WriteHalf,
     config: AndroidAutoConfiguration,
     main: &Box<T>,
+    handshake_done: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<(), ClientError> {
     loop {
         if let Some(f) = sm.recv().await {
@@ -1894,6 +1986,8 @@ async fn do_android_auto_loop<T: AndroidAutoMainTrait + ?Sized>(
                 SslThreadResponse::HandshakeComplete => {
                     sr.write_frame(AndroidAutoControlMessage::SslAuthComplete(true).into())
                         .await?;
+                    // Mark the handshake as done so its watchdog stands down.
+                    handshake_done.store(true, std::sync::atomic::Ordering::Relaxed);
                     log::info!("SSL Handshake complete");
                 }
                 SslThreadResponse::ExitError(e) => {

@@ -338,13 +338,19 @@ impl InnerChannelHandler {
 pub struct ControlChannelHandler {
     /// The inner protected data
     inner: std::sync::Mutex<InnerChannelHandler>,
+    /// Epoch-micros timestamp of the last ping response received from the
+    /// phone. Shared with the keep-alive task so it can detect an
+    /// unresponsive connection. `0` means no response received yet.
+    last_pong: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl ControlChannelHandler {
-    /// Construct a new self
-    pub fn new() -> Self {
+    /// Construct a new self. `last_pong` is shared with the keep-alive
+    /// watchdog and updated whenever a ping response arrives.
+    pub fn new(last_pong: std::sync::Arc<std::sync::atomic::AtomicU64>) -> Self {
         Self {
             inner: std::sync::Mutex::new(InnerChannelHandler::new()),
+            last_pong,
         }
     }
 }
@@ -397,12 +403,17 @@ impl ChannelHandlerTrait for ControlChannelHandler {
                 }
                 AndroidAutoControlMessage::PingResponse(m) => {
                     let t = m.timestamp();
-                    let delta = std::time::SystemTime::now()
+                    let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_micros() as i64
-                        - t;
-                    main.ping_time_microseconds(delta).await;
+                        .map(|d| d.as_micros() as i64)
+                        .unwrap_or(0);
+                    // Record that the phone is alive so the keep-alive
+                    // watchdog does not tear down a healthy connection.
+                    self.last_pong.store(
+                        now.max(0) as u64,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    main.ping_time_microseconds(now - t).await;
                 }
                 AndroidAutoControlMessage::PingRequest(a) => {
                     let mut m = Wifi::PingResponse::new();
