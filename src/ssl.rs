@@ -77,6 +77,17 @@ impl<U: AsyncWrite + Unpin> SslStreamThread<U> {
     /// Build and write a single frame to the underlying writer immediately.
     async fn write_frame_now(&mut self, f: AndroidAutoFrame) -> Result<(), String> {
         use tokio::io::AsyncWriteExt;
+        // Log outgoing control-channel traffic in the clear (capped) so the
+        // version/SSL handshake exchange can be diagnosed byte-for-byte.
+        if f.header.channel_id == 0 && !f.header.frame.get_encryption() {
+            let cap = f.data.len().min(64);
+            log::info!(
+                "TX control frame {:?} len={} data={:02x?}",
+                f.header,
+                f.data.len(),
+                &f.data[..cap]
+            );
+        }
         let d2: Vec<u8> = f
             .build_vec(Some(&mut self.stream))
             .await
@@ -282,6 +293,18 @@ impl StreamMux {
                             if f.header.frame.get_encryption() {
                                 let _ = chan_ssl.send(SslThreadData::DecryptMe(f)).await;
                             } else {
+                                // Plaintext control-channel traffic carries the
+                                // version/SSL handshake; log it (capped) so a
+                                // stalled handshake can be diagnosed.
+                                if f.header.channel_id == 0 {
+                                    let cap = f.data.len().min(64);
+                                    log::info!(
+                                        "RX control frame {:?} len={} data={:02x?}",
+                                        f.header,
+                                        f.data.len(),
+                                        &f.data[..cap]
+                                    );
+                                }
                                 let _ = chanw.send(SslThreadResponse::Data(f));
                             }
                         }
