@@ -148,18 +148,17 @@ pub async fn claim_aoa_interface(device: &nusb::Device) -> nusb::Interface {
 }
 
 pub struct AndroidAutoUsb {
-    ep_in: nusb::io::EndpointRead<nusb::transfer::Bulk>,
+    ep_in: UsbBulkReader,
     ep_out: UsbBulkWriter,
 }
 
 impl AndroidAutoUsb {
     /// construct a new interface to the android usb device
     pub fn new(interface: nusb::Interface) -> Option<Self> {
-        if let Ok(w) = interface.endpoint::<nusb::transfer::Bulk, nusb::transfer::In>(0x81) {
-            let a = w.reader(4096);
+        if let Ok(r) = interface.endpoint::<nusb::transfer::Bulk, nusb::transfer::In>(0x81) {
             if let Ok(w) = interface.endpoint::<nusb::transfer::Bulk, nusb::transfer::Out>(0x1) {
                 return Some(Self {
-                    ep_in: a,
+                    ep_in: UsbBulkReader::new(r),
                     ep_out: UsbBulkWriter::new(w),
                 });
             }
@@ -168,8 +167,111 @@ impl AndroidAutoUsb {
     }
 
     /// split the struct
-    pub fn into_split(self) -> (nusb::io::EndpointRead<nusb::transfer::Bulk>, UsbBulkWriter) {
+    pub fn into_split(self) -> (UsbBulkReader, UsbBulkWriter) {
         (self.ep_in, self.ep_out)
+    }
+}
+
+/// An `AsyncRead` adapter that receives every bulk IN transfer into a **fresh,
+/// owned** `nusb::transfer::Buffer` and never recycles buffers across
+/// transfers.
+///
+/// This deliberately bypasses nusb's buffered [`nusb::io::EndpointRead`], which
+/// reuses the same DMA buffers for successive transfers (see its `resubmit`).
+/// On stricter xHCI controllers (notably the Tegra `70090000.xusb` on the
+/// Switch) a recycled IN buffer can surface stale bytes from a previous
+/// transfer because of weak DMA ordering/coherency — the exact read-side twin
+/// of the write corruption handled by [`UsbBulkWriter`]. Small reads (the
+/// 8-byte version response) survive, but the large multi-KiB TLS certificate
+/// frame comes back corrupted and rustls rejects it with
+/// `InvalidCertificate(BadEncoding)`. Submitting a fresh per-transfer buffer
+/// gives the kernel/DMA a pristine destination every time and eliminates the
+/// aliasing.
+///
+/// To keep the bulk pipe saturated on the high-bitrate video stream, several
+/// transfers are kept in flight at once (a pipeline of depth
+/// [`Self::NUM_TRANSFERS`]). Crucially, each completed buffer is dropped and a
+/// brand-new [`nusb::transfer::Buffer`] is submitted in its place — a buffer is
+/// never recycled back into a subsequent transfer — so the anti-aliasing
+/// guarantee holds while the controller always has a destination ready.
+pub struct UsbBulkReader {
+    /// The raw bulk IN endpoint.
+    ep: nusb::Endpoint<nusb::transfer::Bulk, nusb::transfer::In>,
+    /// A completed transfer currently being drained, with our read cursor.
+    current: Option<(nusb::transfer::Buffer, usize)>,
+    /// `requested_len` for each submitted IN transfer (a multiple of the
+    /// endpoint max packet size, as required by `Endpoint::submit`).
+    req_len: usize,
+    /// Whether the initial batch of transfers has been queued.
+    primed: bool,
+}
+
+impl UsbBulkReader {
+    /// Number of bulk IN transfers kept in flight to keep the pipe saturated.
+    const NUM_TRANSFERS: usize = 4;
+
+    /// Wrap a raw bulk IN endpoint.
+    pub fn new(ep: nusb::Endpoint<nusb::transfer::Bulk, nusb::transfer::In>) -> Self {
+        // IN transfers must request a nonzero multiple of the max packet size.
+        // Request a generous span so a whole Android Auto frame arrives in one
+        // transfer (it ends at the first short packet).
+        let mps = ep.max_packet_size().max(1);
+        let req_len = mps * 32;
+        Self {
+            ep,
+            current: None,
+            req_len,
+            primed: false,
+        }
+    }
+}
+
+impl tokio::io::AsyncRead for UsbBulkReader {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let me = self.get_mut();
+
+        // Prime the pipeline with a batch of fresh transfers on first poll.
+        if !me.primed {
+            for _ in 0..Self::NUM_TRANSFERS {
+                me.ep.submit(nusb::transfer::Buffer::new(me.req_len));
+            }
+            me.primed = true;
+        }
+
+        loop {
+            // Drain any bytes still buffered from the last completed transfer.
+            if let Some((completed, cursor)) = &mut me.current {
+                let data: &[u8] = completed;
+                if *cursor < data.len() {
+                    let n = (data.len() - *cursor).min(buf.remaining());
+                    buf.put_slice(&data[*cursor..*cursor + n]);
+                    *cursor += n;
+                    return std::task::Poll::Ready(Ok(()));
+                }
+                me.current = None;
+            }
+
+            match me.ep.poll_next_complete(cx) {
+                std::task::Poll::Ready(completion) => {
+                    // Replace the just-completed transfer with a brand-new
+                    // buffer (never recycle the completed one) so the pipeline
+                    // stays full and no buffer is reused across transfers.
+                    me.ep.submit(nusb::transfer::Buffer::new(me.req_len));
+                    if let Err(e) = completion.status {
+                        return std::task::Poll::Ready(Err(std::io::Error::other(format!(
+                            "usb bulk in transfer failed: {e:?}"
+                        ))));
+                    }
+                    me.current = Some((completion.buffer, 0));
+                    // Loop back to drain the freshly received bytes.
+                }
+                std::task::Poll::Pending => return std::task::Poll::Pending,
+            }
+        }
     }
 }
 
