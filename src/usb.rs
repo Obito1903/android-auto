@@ -69,7 +69,22 @@ pub async fn wait_for_accessory() -> Result<nusb::Device, nusb::Error> {
                 if info.vendor_id() == 0x18d1
                     && (info.product_id() == 0x2D00 || info.product_id() == 0x2D01)
                 {
-                    log::info!("About to open {:?}", info);
+                    // Android Open Accessory is a USB 2.0 protocol. Many phones
+                    // misbehave when the accessory link enumerates at SuperSpeed
+                    // (USB 3.x), so surface the negotiated speed to make that
+                    // failure mode diagnosable from the logs.
+                    log::info!(
+                        "About to open accessory {:?} (negotiated speed: {:?})",
+                        info,
+                        info.speed()
+                    );
+                    if matches!(info.speed(), Some(nusb::Speed::Super | nusb::Speed::SuperPlus)) {
+                        log::warn!(
+                            "Accessory enumerated at USB 3.x SuperSpeed; AOA/Android Auto \
+                             generally requires USB 2.0 High Speed. If the handshake stalls, \
+                             connect the phone via a USB 2.0 port/cable/hub."
+                        );
+                    }
                     return info.open().await;
                 }
             }
