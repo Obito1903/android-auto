@@ -226,7 +226,12 @@ impl ConnectionType {
             #[cfg(feature = "usb")]
             ConnectionType::Usb(a) => {
                 let stream = a.into_split();
-                let _ = handle_client_generic(stream.0, stream.1, config, main).await;
+                // Wrap the raw USB endpoints so the exact bytes crossing the
+                // bulk pipes are visible below the framing layer; this makes
+                // transport-level handshake failures diagnosable.
+                let reader = usb::LoggingIo::new(stream.0, "USB RX");
+                let writer = usb::LoggingIo::new(stream.1, "USB TX");
+                let _ = handle_client_generic(reader, writer, config, main).await;
             }
             #[cfg(feature = "wireless")]
             ConnectionType::Wireless(w) => {

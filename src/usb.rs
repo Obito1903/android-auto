@@ -178,3 +178,84 @@ impl AndroidAutoUsb {
         (self.ep_in, self.ep_out)
     }
 }
+
+/// An `AsyncRead`/`AsyncWrite` adapter that logs the raw bytes crossing the
+/// USB bulk endpoints. This sits *below* the Android Auto framing layer so the
+/// exact on-wire transfer boundaries and contents are visible. Small transfers
+/// (the version/SSL handshake) are logged at info; larger transfers (video,
+/// audio) are logged at debug to avoid flooding normal operation.
+pub struct LoggingIo<T> {
+    /// The wrapped endpoint reader/writer.
+    inner: T,
+    /// A short label identifying the direction in the logs.
+    label: &'static str,
+}
+
+impl<T> LoggingIo<T> {
+    /// Wrap an endpoint with raw-byte logging under the given label.
+    pub fn new(inner: T, label: &'static str) -> Self {
+        Self { inner, label }
+    }
+}
+
+/// Log a raw USB chunk, capping the displayed bytes and using info for small
+/// (handshake-sized) transfers, debug for larger ones.
+fn log_raw(label: &str, bytes: &[u8]) {
+    if bytes.is_empty() {
+        return;
+    }
+    let cap = bytes.len().min(64);
+    if bytes.len() <= 64 {
+        log::info!("{} raw {} bytes: {:02x?}", label, bytes.len(), &bytes[..cap]);
+    } else {
+        log::debug!("{} raw {} bytes: {:02x?}", label, bytes.len(), &bytes[..cap]);
+    }
+}
+
+impl<T: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for LoggingIo<T> {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let me = self.get_mut();
+        let before = buf.filled().len();
+        let r = std::pin::Pin::new(&mut me.inner).poll_read(cx, buf);
+        if let std::task::Poll::Ready(Ok(())) = &r {
+            let new = &buf.filled()[before..];
+            log_raw(me.label, new);
+        }
+        r
+    }
+}
+
+impl<T: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for LoggingIo<T> {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let me = self.get_mut();
+        let r = std::pin::Pin::new(&mut me.inner).poll_write(cx, buf);
+        if let std::task::Poll::Ready(Ok(n)) = &r {
+            log_raw(me.label, &buf[..*n]);
+        }
+        r
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let me = self.get_mut();
+        std::pin::Pin::new(&mut me.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let me = self.get_mut();
+        std::pin::Pin::new(&mut me.inner).poll_shutdown(cx)
+    }
+}
