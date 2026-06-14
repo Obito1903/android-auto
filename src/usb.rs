@@ -149,7 +149,7 @@ pub async fn claim_aoa_interface(device: &nusb::Device) -> nusb::Interface {
 
 pub struct AndroidAutoUsb {
     ep_in: nusb::io::EndpointRead<nusb::transfer::Bulk>,
-    ep_out: nusb::io::EndpointWrite<nusb::transfer::Bulk>,
+    ep_out: UsbBulkWriter,
 }
 
 impl AndroidAutoUsb {
@@ -158,10 +158,9 @@ impl AndroidAutoUsb {
         if let Ok(w) = interface.endpoint::<nusb::transfer::Bulk, nusb::transfer::In>(0x81) {
             let a = w.reader(4096);
             if let Ok(w) = interface.endpoint::<nusb::transfer::Bulk, nusb::transfer::Out>(0x1) {
-                let b = w.writer(4096);
                 return Some(Self {
                     ep_in: a,
-                    ep_out: b,
+                    ep_out: UsbBulkWriter::new(w),
                 });
             }
         }
@@ -169,13 +168,97 @@ impl AndroidAutoUsb {
     }
 
     /// split the struct
-    pub fn into_split(
-        self,
-    ) -> (
-        nusb::io::EndpointRead<nusb::transfer::Bulk>,
-        nusb::io::EndpointWrite<nusb::transfer::Bulk>,
-    ) {
+    pub fn into_split(self) -> (nusb::io::EndpointRead<nusb::transfer::Bulk>, UsbBulkWriter) {
         (self.ep_in, self.ep_out)
+    }
+}
+
+/// An `AsyncWrite` adapter that sends every Android Auto frame as its own bulk
+/// transfer using an **owned** `nusb::transfer::Buffer`.
+///
+/// This deliberately bypasses nusb's buffered [`nusb::io::EndpointWrite`]. On
+/// stricter xHCI controllers (notably the Tegra `70090000.xusb` on the Switch)
+/// the buffered writer hands the kernel a DMA buffer whose contents lag the
+/// requested length by one transfer: the first OUT transfer goes out as all
+/// zeros and each subsequent transfer carries the *previous* frame's bytes.
+/// The phone then receives a corrupt version request, rejects the session with
+/// a 2-byte `0xffff` control frame, and the handshake never completes. (The
+/// same code works on x86 hosts thanks to coherent DMA and stronger memory
+/// ordering, which is why this only reproduces on the Switch.)
+///
+/// By submitting an owned, per-frame buffer the kernel always sees exactly the
+/// bytes we intended, eliminating the aliasing/lag.
+pub struct UsbBulkWriter {
+    /// The raw bulk OUT endpoint.
+    ep: nusb::Endpoint<nusb::transfer::Bulk, nusb::transfer::Out>,
+    /// Whether a transfer submitted by `poll_write` is still in flight.
+    pending: bool,
+}
+
+impl UsbBulkWriter {
+    /// Wrap a raw bulk OUT endpoint.
+    pub fn new(ep: nusb::Endpoint<nusb::transfer::Bulk, nusb::transfer::Out>) -> Self {
+        Self { ep, pending: false }
+    }
+
+    /// Drive the in-flight transfer (if any) to completion, surfacing any
+    /// transfer error. `poll_next_complete` panics if nothing is pending, so it
+    /// is only polled while `self.pending` is set.
+    fn poll_drain(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        if self.pending {
+            match self.ep.poll_next_complete(cx) {
+                std::task::Poll::Ready(completion) => {
+                    self.pending = false;
+                    if let Err(e) = completion.status {
+                        return std::task::Poll::Ready(Err(std::io::Error::other(format!(
+                            "usb bulk out transfer failed: {e:?}"
+                        ))));
+                    }
+                }
+                std::task::Poll::Pending => return std::task::Poll::Pending,
+            }
+        }
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
+impl tokio::io::AsyncWrite for UsbBulkWriter {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let me = self.get_mut();
+        // Finish the previous frame's transfer before queuing the next so that
+        // frames are sent in order and back-pressure is applied.
+        if let std::task::Poll::Pending = me.poll_drain(cx)? {
+            return std::task::Poll::Pending;
+        }
+        if buf.is_empty() {
+            return std::task::Poll::Ready(Ok(0));
+        }
+        // Submit an owned copy: the kernel/DMA sees exactly these bytes.
+        me.ep
+            .submit(nusb::transfer::Buffer::from(buf.to_vec()));
+        me.pending = true;
+        std::task::Poll::Ready(Ok(buf.len()))
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        self.get_mut().poll_drain(cx)
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        self.get_mut().poll_drain(cx)
     }
 }
 
