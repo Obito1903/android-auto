@@ -327,7 +327,17 @@ pub trait AndroidAutoMainTrait:
         .await
         {
             Ok(Ok(newdev)) => {
-                let _ = newdev.reset().await;
+                // NOTE: We intentionally do NOT issue a USB device reset here.
+                // A mid-setup reset is non-standard for Android Open Accessory
+                // (aasdk/openauto never reset the accessory) and on stricter
+                // xHCI controllers (e.g. the Tegra `70090000.xusb` on the
+                // Switch) it leaves the AOA bulk pipe / data-toggle state
+                // inconsistent. The phone then receives the version request but
+                // rejects the session (replying with a 2-byte 0xffff control
+                // frame) and the handshake never completes. Just drop this
+                // handle; the accessory is already enumerated and ready to
+                // claim below.
+                drop(newdev);
             }
             Ok(Err(e)) => {
                 log::error!("Failed to get accessory {e}");
