@@ -1888,17 +1888,25 @@ async fn handle_client_generic<
     // cannot hang the worker indefinitely.
     let handshake_done_wd = handshake_done.clone();
     let handshake_watchdog_tx = handshake_watchdog.0;
-    tokio::spawn(async move {
-        tokio::time::sleep(HANDSHAKE_TIMEOUT).await;
-        if !handshake_done_wd.load(std::sync::atomic::Ordering::Relaxed) {
-            log::error!(
-                "Handshake watchdog: SSL/version handshake did not complete \
-                 within {:?}; closing the connection",
-                HANDSHAKE_TIMEOUT
-            );
-            let _ = handshake_watchdog_tx.send(());
-        }
-    });
+    let _handshake_watchdog_task = DroppingJoinHandle {
+        handle: tokio::spawn(async move {
+            tokio::time::sleep(HANDSHAKE_TIMEOUT).await;
+            if !handshake_done_wd.load(std::sync::atomic::Ordering::Relaxed) {
+                log::error!(
+                    "Handshake watchdog: SSL/version handshake did not complete \
+                     within {:?}; closing the connection",
+                    HANDSHAKE_TIMEOUT
+                );
+                let _ = handshake_watchdog_tx.send(());
+            } else {
+                // Handshake completed in time. Keep the sender alive forever so
+                // that dropping it does not wake the main `select!` below and
+                // tear down a perfectly healthy connection. The task is aborted
+                // via its DroppingJoinHandle when the connection ends.
+                std::future::pending::<()>().await;
+            }
+        }),
+    };
 
     log::info!("Sending channel handlers");
     {
