@@ -694,6 +694,11 @@ pub enum AndroidAutoMessage {
     Audio(Option<u64>, Vec<u8>),
     /// A sensor event message
     Sensor(Wifi::SensorEventIndication),
+    /// A proactive video focus indication from the head unit (e.g. asking to
+    /// bring Android Auto back to the foreground after an "Exit" intent). The
+    /// head unit signals focus changes to the phone with this message, setting
+    /// `unrequested = true` when it initiates the change itself.
+    VideoFocusIndication(Wifi::VideoFocusIndication),
     /// An other message
     Other,
 }
@@ -707,6 +712,8 @@ pub enum SendableChannelType {
     AudioInput,
     /// The sensor channel
     Sensor,
+    /// The video channel
+    Video,
     /// Other channel type
     Other,
 }
@@ -741,6 +748,12 @@ impl SendableAndroidAutoMessage {
                 }
                 SendableChannelType::Input => {
                     if let ChannelHandler::Input(_) = c {
+                        chan = Some(i as u8);
+                        break;
+                    }
+                }
+                SendableChannelType::Video => {
+                    if let ChannelHandler::Video(_) = c {
                         chan = Some(i as u8);
                         break;
                     }
@@ -807,6 +820,19 @@ impl AndroidAutoMessage {
                 m.append(&mut data);
                 SendableAndroidAutoMessage {
                     channel: SendableChannelType::AudioInput,
+                    data: m,
+                }
+            }
+            Self::VideoFocusIndication(m) => {
+                let mut data = m.write_to_bytes().unwrap();
+                let t = Wifi::avchannel_message::Enum::VIDEO_FOCUS_INDICATION as u16;
+                let t = t.to_be_bytes();
+                let mut m = Vec::new();
+                m.push(t[0]);
+                m.push(t[1]);
+                m.append(&mut data);
+                SendableAndroidAutoMessage {
+                    channel: SendableChannelType::Video,
                     data: m,
                 }
             }

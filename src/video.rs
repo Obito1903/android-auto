@@ -147,9 +147,24 @@ impl ChannelHandlerTrait for VideoChannelHandler {
                 }
                 AvChannelMessage::SetupResponse(_chan, _m) => unimplemented!(),
                 AvChannelMessage::VideoFocusRequest(_chan, m) => {
+                    let focused = m.focus_mode() == Wifi::video_focus_mode::Enum::FOCUSED;
+                    if focused {
+                        tracing::info!(
+                            "Video focus request: FOCUSED (reason {:?}) — Android Auto wants the screen",
+                            m.focus_reason()
+                        );
+                    } else {
+                        // The phone is relinquishing the screen: this is the
+                        // Android Auto "Exit" intent (the user tapped the
+                        // car/exit button). The head unit should display its own
+                        // GUI while keeping the Android Auto session alive.
+                        tracing::info!(
+                            "Video focus request: UNFOCUSED (reason {:?}) — Android Auto \"Exit\" intent; returning to head unit GUI",
+                            m.focus_reason()
+                        );
+                    }
                     let mut m2 = Wifi::VideoFocusIndication::new();
-                    main.set_focus(m.focus_mode() == Wifi::video_focus_mode::Enum::FOCUSED)
-                        .await;
+                    main.set_focus(focused).await;
                     m2.set_focus_mode(m.focus_mode());
                     m2.set_unrequested(false);
                     stream
