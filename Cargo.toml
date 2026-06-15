@@ -14,7 +14,7 @@ bitfield = "0.19.0"
 bluetooth-rust = { version = "0.3.8", optional = true }
 enum_dispatch = "0.3.13"
 futures = "0.3.30"
-log = "0.4.27"
+tracing = "0.1"
 nusb = { version = "0.2.2", features = ["tokio"], optional = true }
 protobuf = "3.7.2"
 rustls = { version = "0.23.27", features=["ring"]}
@@ -28,6 +28,8 @@ protobuf-codegen = "3.7.2"
 [dev-dependencies]
 cpal = "0.17.3"
 eframe = "0.33.3"
+# The bundled examples still emit through the `log` facade.
+log = "0.4.27"
 nmrs = "2.0.1"
 openh264 = "0.9.3"
 ringbuf = "0.4.8"

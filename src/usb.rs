@@ -73,13 +73,13 @@ pub async fn wait_for_accessory() -> Result<nusb::Device, nusb::Error> {
                     // misbehave when the accessory link enumerates at SuperSpeed
                     // (USB 3.x), so surface the negotiated speed to make that
                     // failure mode diagnosable from the logs.
-                    log::info!(
+                    tracing::info!(
                         "About to open accessory {:?} (negotiated speed: {:?})",
                         info,
                         info.speed()
                     );
                     if matches!(info.speed(), Some(nusb::Speed::Super | nusb::Speed::SuperPlus)) {
-                        log::warn!(
+                        tracing::warn!(
                             "Accessory enumerated at USB 3.x SuperSpeed; AOA/Android Auto \
                              generally requires USB 2.0 High Speed. If the handshake stalls, \
                              connect the phone via a USB 2.0 port/cable/hub."
@@ -89,7 +89,7 @@ pub async fn wait_for_accessory() -> Result<nusb::Device, nusb::Error> {
                 }
             }
         }
-        log::info!("Didnt find accessory");
+        tracing::info!("Didnt find accessory");
     }
 }
 
@@ -391,9 +391,9 @@ fn log_raw(label: &str, bytes: &[u8]) {
     }
     let cap = bytes.len().min(64);
     if bytes.len() <= 64 {
-        log::info!("{} raw {} bytes: {:02x?}", label, bytes.len(), &bytes[..cap]);
+        tracing::info!("{} raw {} bytes: {:02x?}", label, bytes.len(), &bytes[..cap]);
     } else {
-        log::debug!("{} raw {} bytes: {:02x?}", label, bytes.len(), &bytes[..cap]);
+        tracing::debug!("{} raw {} bytes: {:02x?}", label, bytes.len(), &bytes[..cap]);
     }
 }
 

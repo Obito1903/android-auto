@@ -91,13 +91,13 @@ impl ChannelHandlerTrait for MediaStatusChannelHandler {
         if let Ok(msg2) = msg2 {
             match msg2 {
                 MediaStatusMessage::Metadata(_, m) => {
-                    log::info!("Metadata {:?}", m);
+                    tracing::info!("Metadata {:?}", m);
                 }
                 MediaStatusMessage::Playback(_, m) => {
-                    log::info!("Playback {:?}", m);
+                    tracing::info!("Playback {:?}", m);
                 }
                 MediaStatusMessage::Invalid => {
-                    log::error!("Received invalid media info frame");
+                    tracing::error!("Received invalid media info frame");
                 }
             }
             return Ok(());

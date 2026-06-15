@@ -65,7 +65,7 @@ impl<U: AsyncWrite + Unpin> SslStreamThread<U> {
     /// protocol. Discarded frames (e.g. periodic sensor data) are re-sent later.
     async fn send_or_discard(&mut self, f: AndroidAutoFrame) -> Result<(), String> {
         if f.header.frame.get_encryption() && !self.hs_completed {
-            log::debug!(
+            tracing::debug!(
                 "Discarding encrypted frame on channel {} before handshake completion",
                 f.header.channel_id
             );
@@ -81,7 +81,7 @@ impl<U: AsyncWrite + Unpin> SslStreamThread<U> {
         // version/SSL handshake exchange can be diagnosed byte-for-byte.
         if f.header.channel_id == 0 && !f.header.frame.get_encryption() {
             let cap = f.data.len().min(64);
-            log::info!(
+            tracing::info!(
                 "TX control frame {:?} len={} data={:02x?}",
                 f.header,
                 f.data.len(),
@@ -105,7 +105,7 @@ impl<U: AsyncWrite + Unpin> SslStreamThread<U> {
         match m {
             SslThreadData::DecryptMe(mut data) => {
                 if let Err(e) = data.decrypt(&mut self.stream).await {
-                    log::error!("Error receiving frame: {:?}", e);
+                    tracing::error!("Error receiving frame: {:?}", e);
                     return Err(format!("frame error {:?}", e));
                 }
                 let _ = self.dout.send(SslThreadResponse::Data(data));
@@ -189,7 +189,7 @@ impl<U: AsyncWrite + Unpin> SslStreamThread<U> {
                 if let Some(frame) = f.into_frame().await {
                     self.send_or_discard(frame).await?;
                 } else {
-                    log::warn!("Dropping message: no matching channel handler available yet");
+                    tracing::warn!("Dropping message: no matching channel handler available yet");
                 }
             }
             SslThreadData::Frame(f) => {
@@ -298,7 +298,7 @@ impl StreamMux {
                                 // stalled handshake can be diagnosed.
                                 if f.header.channel_id == 0 {
                                     let cap = f.data.len().min(64);
-                                    log::info!(
+                                    tracing::info!(
                                         "RX control frame {:?} len={} data={:02x?}",
                                         f.header,
                                         f.data.len(),
@@ -314,7 +314,7 @@ impl StreamMux {
                             // produced an unrecoverable read error. Propagate it
                             // so the protocol loop can tear down instead of
                             // spinning forever on a dead stream.
-                            log::info!("Reader task stopping: {:?}", e);
+                            tracing::info!("Reader task stopping: {:?}", e);
                             let _ = chanw
                                 .send(SslThreadResponse::ExitError(format!("read error: {:?}", e)));
                             break;
@@ -322,7 +322,7 @@ impl StreamMux {
                     },
                     Ok(None) => {}
                     Err(e) => {
-                        log::info!("Reader task stopping: {:?}", e);
+                        tracing::info!("Reader task stopping: {:?}", e);
                         let _ = chanw
                             .send(SslThreadResponse::ExitError(format!("read error: {:?}", e)));
                         break;
