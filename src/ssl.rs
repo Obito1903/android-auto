@@ -105,6 +105,23 @@ impl<U: AsyncWrite + Unpin> SslStreamThread<U> {
         match m {
             SslThreadData::DecryptMe(mut data) => {
                 if let Err(e) = data.decrypt(&mut self.stream).await {
+                    // Before the fresh TLS handshake completes, a phone that
+                    // still holds a session from a previous run (e.g. after the
+                    // head unit restarted without a USB replug) can emit leftover
+                    // encrypted `ApplicationData` frames. rustls has no session
+                    // keys yet, so decryption fails with `InappropriateMessage`.
+                    // Dropping such stale frames keeps the connection alive so the
+                    // real handshake can proceed, instead of tearing everything
+                    // down and forcing a reconnect cycle. Once the handshake has
+                    // completed a decrypt error is a genuine failure and is fatal.
+                    if !self.hs_completed {
+                        tracing::warn!(
+                            "Dropping undecryptable frame before handshake completion \
+                             (likely stale data from a previous session): {:?}",
+                            e
+                        );
+                        return Ok(());
+                    }
                     tracing::error!("Error receiving frame: {:?}", e);
                     return Err(format!("frame error {:?}", e));
                 }
@@ -112,7 +129,14 @@ impl<U: AsyncWrite + Unpin> SslStreamThread<U> {
             }
             SslThreadData::HandshakeStart => {
                 if self.hs_started {
-                    unimplemented!();
+                    // A duplicate `VersionResponse` (seen when a phone replays the
+                    // tail of a previous session on reconnect) would drive a second
+                    // handshake start. rustls has already emitted its ClientHello,
+                    // so re-driving it is meaningless; ignore it rather than
+                    // panicking and killing the worker.
+                    tracing::warn!(
+                        "Ignoring duplicate handshake start (handshake already in progress)"
+                    );
                 } else {
                     let mut buf = Vec::new();
                     self.stream
