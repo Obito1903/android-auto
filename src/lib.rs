@@ -1608,10 +1608,29 @@ async fn handle_bluetooth_client(
     stream: &mut BluetoothStream,
     network2: &NetworkInformation,
 ) -> Result<(), String> {
+    log::info!("Got a bluetooth client");
+
+    // Send the Wi-Fi credentials (SSID/PSK/BSSID/security) up front. Modern
+    // Android Auto clients (e.g. recent Pixels) do not send a
+    // `BLUETOOTH_NETWORK_INFO_REQUEST` before connecting; they expect the head
+    // unit to advertise the network proactively. Waiting to be asked leaves the
+    // phone without credentials, so it ACKs the socket request with
+    // STATUS_SUCCESS but never associates with the access point. The phone
+    // still works if it does ask later — the request branch below resends this.
+    let mut net = Bluetooth::NetworkInfo::new();
+    net.set_ssid(network2.ssid.clone());
+    net.set_psk(network2.psk.clone());
+    net.set_mac_addr(network2.mac_addr.clone());
+    net.set_security_mode(network2.security_mode);
+    net.set_ap_type(network2.ap_type);
+    let net = AndroidAutoBluetoothMessage::NetworkInfoMessage(net);
+    let net: AndroidAutoRawBluetoothMessage = net.as_message();
+    let net_data: Vec<u8> = net.into();
+    stream.write_all(&net_data).await.map_err(|e| e.to_string())?;
+
     let mut s = Bluetooth::SocketInfoRequest::new();
     s.set_ip_address(network2.ip.clone());
     s.set_port(network2.port as u32);
-    log::info!("Got a bluetooth client");
     let m1 = AndroidAutoBluetoothMessage::SocketInfoRequest(s);
     let m: AndroidAutoRawBluetoothMessage = m1.as_message();
     let mdata: Vec<u8> = m.into();
