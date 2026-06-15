@@ -381,11 +381,11 @@ impl ChannelHandlerTrait for ControlChannelHandler {
         if let Ok(msg2) = msg2 {
             match msg2 {
                 AndroidAutoControlMessage::VoiceSession(m) => {
-                    tracing::error!("Received voice session request {:?}", m);
+                    tracing::debug!("Voice session request received: {:?}", m);
                 }
                 AndroidAutoControlMessage::NavigationFocusResponse(_) => unimplemented!(),
                 AndroidAutoControlMessage::NavigationFocusRequest(m) => {
-                    tracing::error!("Received navigation focus request {}", m.type_());
+                    tracing::debug!("Navigation focus request received: {}", m.type_());
                     let mut m2 = Wifi::NavigationFocusResponse::new();
                     m2.set_type(2);
                     stream

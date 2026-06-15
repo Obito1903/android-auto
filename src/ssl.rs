@@ -81,7 +81,7 @@ impl<U: AsyncWrite + Unpin> SslStreamThread<U> {
         // version/SSL handshake exchange can be diagnosed byte-for-byte.
         if f.header.channel_id == 0 && !f.header.frame.get_encryption() {
             let cap = f.data.len().min(64);
-            tracing::info!(
+            tracing::trace!(
                 "TX control frame {:?} len={} data={:02x?}",
                 f.header,
                 f.data.len(),
@@ -298,7 +298,7 @@ impl StreamMux {
                                 // stalled handshake can be diagnosed.
                                 if f.header.channel_id == 0 {
                                     let cap = f.data.len().min(64);
-                                    tracing::info!(
+                                    tracing::trace!(
                                         "RX control frame {:?} len={} data={:02x?}",
                                         f.header,
                                         f.data.len(),
@@ -314,7 +314,7 @@ impl StreamMux {
                             // produced an unrecoverable read error. Propagate it
                             // so the protocol loop can tear down instead of
                             // spinning forever on a dead stream.
-                            tracing::info!("Reader task stopping: {:?}", e);
+                            tracing::debug!("Reader task stopping: {:?}", e);
                             let _ = chanw
                                 .send(SslThreadResponse::ExitError(format!("read error: {:?}", e)));
                             break;
@@ -322,7 +322,7 @@ impl StreamMux {
                     },
                     Ok(None) => {}
                     Err(e) => {
-                        tracing::info!("Reader task stopping: {:?}", e);
+                        tracing::debug!("Reader task stopping: {:?}", e);
                         let _ = chanw
                             .send(SslThreadResponse::ExitError(format!("read error: {:?}", e)));
                         break;

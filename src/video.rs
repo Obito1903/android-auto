@@ -86,9 +86,15 @@ impl ChannelHandlerTrait for VideoChannelHandler {
             match msg2 {
                 AndroidAutoCommonMessage::ChannelOpenResponse(_, _) => unimplemented!(),
                 AndroidAutoCommonMessage::ChannelOpenRequest(m) => {
-                    tracing::info!("Got channel open request for video: {:?}", m);
+                    tracing::debug!("Video channel open request: {:?}", m);
+                    let ok = main.setup_video().await.is_ok();
+                    if ok {
+                        tracing::info!("Video channel opened");
+                    } else {
+                        tracing::warn!("Video channel setup failed");
+                    }
                     let mut m2 = Wifi::ChannelOpenResponse::new();
-                    m2.set_status(if main.setup_video().await.is_ok() {
+                    m2.set_status(if ok {
                         Wifi::status::Enum::OK
                     } else {
                         Wifi::status::Enum::FAIL

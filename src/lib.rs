@@ -237,7 +237,7 @@ impl ConnectionType {
             ConnectionType::Wireless(w) => {
                 let stream = w.into_split();
                 let a = handle_client_generic(stream.0, stream.1, config, main).await;
-                tracing::error!("The error for wifi is {:?}", a);
+                tracing::debug!("Wireless client session ended: {:?}", a);
             }
         }
     }
@@ -280,7 +280,7 @@ pub trait AndroidAutoMainTrait:
 
     /// A method of receiving the ping times for the head unit
     async fn ping_time_microseconds(&self, micros: i64) {
-        tracing::info!("Ping response is {} microseconds", micros);
+        tracing::debug!("Ping response is {} microseconds", micros);
     }
 
     /// The android auto device just connected
@@ -305,7 +305,7 @@ pub trait AndroidAutoMainTrait:
         match d.open().await {
             Ok(d) => {
                 let aoa = usb::get_aoa_protocol(&d).await;
-                tracing::info!("AOA is {:?}", aoa);
+                tracing::debug!("AOA is {:?}", aoa);
                 if let Err(e) = usb::identify_accessory(&d).await {
                     tracing::error!("Failed to identify accessory: {e:?}");
                     return Err(());
@@ -355,11 +355,10 @@ pub trait AndroidAutoMainTrait:
         .await
         {
             Ok(Ok(newdev)) => {
-                tracing::info!("AOA DEV IS {:?}", newdev);
+                tracing::debug!("AOA accessory device enumerated: {:?}", newdev);
                 let aoa = usb::claim_aoa_interface(&newdev).await;
                 let aauto = usb::AndroidAutoUsb::new(aoa);
                 if let Some(aauto) = aauto {
-                    tracing::info!("got aoa interface?");
                     return Ok(ConnectionType::Usb(aauto));
                 } else {
                     Err(())
@@ -387,7 +386,7 @@ pub trait AndroidAutoMainTrait:
             if self.supports_wired().is_some() {
                 if let Ok(mut watcher) = nusb::watch_devices() {
                     use futures::StreamExt;
-                    tracing::info!("Looking for usb devices");
+                    tracing::debug!("Looking for usb devices");
                     let looper = async |watcher: &mut nusb::hotplug::HotplugWatch| {
                         loop {
                             if let Some(dev) = watcher.next().await {
@@ -477,13 +476,13 @@ pub trait AndroidAutoMainTrait:
                 };
 
                 if let Ok(profile) = wireless.setup_bluetooth_profile(&psettings).await {
-                    tracing::info!("Setup bluetooth profile is ok?");
+                    tracing::debug!("Bluetooth RFCOMM profile registered");
                     let wireless2 = wireless.clone();
                     let kill = tokio::sync::oneshot::channel::<()>();
                     tokio::spawn(async move {
                         tokio::select! {
                             e = bluetooth_service(profile, wireless2) => {
-                                tracing::error!("Android auto bluetooth service stopped: {:?}", e);
+                                tracing::warn!("Android auto bluetooth service stopped: {:?}", e);
                                 e
                             }
                             _ = kill.1 => {
@@ -529,11 +528,11 @@ pub trait AndroidAutoMainTrait:
 
         let (d, abort, kill) = tokio::select! {
             a = self.usb_run(&config, setup) => {
-                tracing::info!("usb config finished");
+                tracing::debug!("USB transport ready");
                 a
             }
             b = self.wifi_run(&config, setup) => {
-                tracing::info!("wifi config finished");
+                tracing::debug!("Wi-Fi transport ready");
                 b
             }
         };
@@ -541,10 +540,10 @@ pub trait AndroidAutoMainTrait:
         self.connect().await;
         tokio::select! {
             a = d.run(config, &self) => {
-                tracing::error!("Android auto finished {:?}", a);
+                tracing::info!("Android Auto session ended: {:?}", a);
             }
             b = abort() => {
-                tracing::error!("Android auto aborted {:?}", b);
+                tracing::debug!("Android Auto session aborted: {:?}", b);
             }
         }
         kill().await;
@@ -1657,7 +1656,7 @@ async fn handle_bluetooth_client(
         match Bluetooth::MessageId::from_i32(ty as i32) {
             Some(m) => match m {
                 Bluetooth::MessageId::BLUETOOTH_SOCKET_INFO_REQUEST => {
-                    tracing::error!("Got a socket info request {:x?}", message);
+                    tracing::debug!("Bluetooth socket info request; ending negotiation");
                     break;
                 }
                 Bluetooth::MessageId::BLUETOOTH_NETWORK_INFO_REQUEST => {
@@ -1675,7 +1674,7 @@ async fn handle_bluetooth_client(
                 }
                 Bluetooth::MessageId::BLUETOOTH_SOCKET_INFO_RESPONSE => {
                     let message = Bluetooth::SocketInfoResponse::parse_from_bytes(&message);
-                    tracing::info!("Message is now {:?}", message);
+                    tracing::debug!("Bluetooth socket info response: {:?}", message);
                     if let Ok(m) = message {
                         if m.status() == Status::STATUS_SUCCESS {
                             break;
@@ -1685,12 +1684,12 @@ async fn handle_bluetooth_client(
                 _ => {}
             },
             _ => {
-                tracing::error!("Unknown bluetooth packet {} {:x?}", ty, message);
+                tracing::warn!("Unknown bluetooth packet {} {:x?}", ty, message);
             }
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    tracing::info!("Ending bluetooth comms");
+    tracing::debug!("Ending bluetooth comms");
     Ok(())
 }
 
@@ -1705,7 +1704,7 @@ async fn bluetooth_service(
     mut profile: bluetooth_rust::BluetoothRfcommProfileAsync,
     wireless: Arc<dyn AndroidAutoWirelessTrait>,
 ) -> Result<(), String> {
-    tracing::info!("Starting bluetooth service");
+    tracing::debug!("Starting bluetooth service");
     loop {
         if let Ok(c) = profile.connectable().await {
             let network2 = wireless.get_wifi_details();
@@ -1721,7 +1720,7 @@ async fn bluetooth_service(
             )
             .await
             {
-                Ok(e) => tracing::info!("Bluetooth client disconnected: {:?}", e),
+                Ok(e) => tracing::debug!("Bluetooth client disconnected: {:?}", e),
                 Err(_) => tracing::warn!(
                     "Bluetooth negotiation timed out after {:?}; dropping client",
                     BT_NEGOTIATION_TIMEOUT
@@ -1743,7 +1742,7 @@ async fn wifi_service<T: AndroidAutoWirelessTrait + Send + ?Sized>(
         network.port
     );
     if let Ok(a) = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", network.port)).await {
-        tracing::info!("Starting wifi listener");
+        tracing::debug!("Starting wifi listener");
         loop {
             if let Ok((stream, _addr)) = a.accept().await {
                 let _ = stream.set_nodelay(true);
@@ -1907,14 +1906,14 @@ async fn handle_client_generic<
                         .write_frame(AndroidAutoControlMessage::PingRequest(m).into())
                         .await
                     {
-                        tracing::error!("Error sending ping request {:?}", e);
+                        tracing::warn!("Error sending ping request {:?}", e);
                     }
                 }
             } => {}
             _ = kill2.1 => {
             }
         }
-        tracing::info!("Exiting pinger");
+        tracing::debug!("Exiting pinger");
     });
 
     // Handshake watchdog: if the SSL/version handshake does not complete in
@@ -1942,7 +1941,7 @@ async fn handle_client_generic<
         }),
     };
 
-    tracing::info!("Sending channel handlers");
+    tracing::debug!("Sending channel handlers");
     {
         let mut channel_handlers: Vec<ChannelHandler> = Vec::new();
         channel_handlers.push(ControlChannelHandler::new(last_pong.clone()).into());
@@ -1979,7 +1978,7 @@ async fn handle_client_generic<
             ch.append(&mut channel_handlers);
         }
     }
-    tracing::info!("Sending version request");
+    tracing::debug!("Sending version request");
     sm.1.write_frame(AndroidAutoControlMessage::VersionRequest.into())
         .await
         .map_err(|e| {
@@ -2040,7 +2039,7 @@ async fn do_android_auto_loop<T: AndroidAutoMainTrait + ?Sized>(
         } else {
             // The SSL response channel closed: the reader/SSL thread is gone,
             // so the connection is dead. Return instead of busy-looping.
-            tracing::info!("SSL response channel closed, ending android auto loop");
+            tracing::debug!("SSL response channel closed, ending android auto loop");
             return Err(ClientError::SslThreadExit(
                 "ssl response channel closed".to_string(),
             ));

@@ -73,7 +73,7 @@ pub async fn wait_for_accessory() -> Result<nusb::Device, nusb::Error> {
                     // misbehave when the accessory link enumerates at SuperSpeed
                     // (USB 3.x), so surface the negotiated speed to make that
                     // failure mode diagnosable from the logs.
-                    tracing::info!(
+                    tracing::debug!(
                         "About to open accessory {:?} (negotiated speed: {:?})",
                         info,
                         info.speed()
@@ -89,7 +89,7 @@ pub async fn wait_for_accessory() -> Result<nusb::Device, nusb::Error> {
                 }
             }
         }
-        tracing::info!("Didnt find accessory");
+        tracing::debug!("No AOA accessory found among USB devices");
     }
 }
 
@@ -391,9 +391,9 @@ fn log_raw(label: &str, bytes: &[u8]) {
     }
     let cap = bytes.len().min(64);
     if bytes.len() <= 64 {
-        tracing::info!("{} raw {} bytes: {:02x?}", label, bytes.len(), &bytes[..cap]);
+        tracing::trace!("{} raw {} bytes: {:02x?}", label, bytes.len(), &bytes[..cap]);
     } else {
-        tracing::debug!("{} raw {} bytes: {:02x?}", label, bytes.len(), &bytes[..cap]);
+        tracing::trace!("{} raw {} bytes: {:02x?}", label, bytes.len(), &bytes[..cap]);
     }
 }
 
