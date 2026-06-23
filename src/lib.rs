@@ -387,6 +387,18 @@ pub trait AndroidAutoMainTrait:
                 if let Ok(mut watcher) = nusb::watch_devices() {
                     use futures::StreamExt;
                     tracing::debug!("Looking for usb devices");
+                    // If we are inheriting a phone that is still in AOA accessory
+                    // mode from a previous run (e.g. after a UI crash/restart
+                    // without a physical replug), it holds a stale Android Auto
+                    // session that will deadlock the fresh TLS handshake. Reset
+                    // it first so the phone restarts Android Auto cleanly. Opt-in
+                    // via config so controllers that misbehave on reset can skip
+                    // it.
+                    if config.reset_stale_accessory && usb::reset_stale_accessories().await {
+                        // Give the bus a moment to re-enumerate the device before
+                        // the scan below picks it up.
+                        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                    }
                     let looper = async |watcher: &mut nusb::hotplug::HotplugWatch| {
                         loop {
                             if let Some(dev) = watcher.next().await {
@@ -934,6 +946,16 @@ pub struct AndroidAutoConfiguration {
     pub unit: HeadUnitInfo,
     /// The android auto client certificate and private key in pem format (only if a custom one is desired)
     pub custom_certificate: Option<(Vec<u8>, Vec<u8>)>,
+    /// When true, a USB device found already in AOA accessory mode at startup is
+    /// reset (re-enumerated) before connecting, forcing the phone to drop any
+    /// stale Android Auto session inherited from a previous head-unit run (e.g.
+    /// after a UI crash/restart without a physical replug). This is the
+    /// programmatic equivalent of unplugging and replugging the cable.
+    ///
+    /// Leave this disabled on stricter xHCI controllers (notably the Tegra
+    /// `70090000.xusb` on the Nintendo Switch) where a reset corrupts the AOA
+    /// bulk pipe / data-toggle state and breaks the handshake.
+    pub reset_stale_accessory: bool,
 }
 
 /// The channel identifier for channels in the android auto protocol
@@ -1110,7 +1132,6 @@ impl AndroidAutoFrame {
         ssl_stream: &mut rustls::client::ClientConnection,
     ) -> Result<(), FrameReceiptError> {
         if self.header.frame.get_encryption() {
-            let tls_len = u16::from_be_bytes([self.data[3], self.data[4]]);
             let mut plain_data = vec![0u8; self.data.len()];
             let mut cursor = Cursor::new(&self.data);
             let mut index = 0;
@@ -2016,10 +2037,18 @@ async fn handle_client_generic<
 
     tokio::select! {
         a = do_android_auto_loop(channel_handlers, sm.0, &sm.1, config, main, handshake_done) => {
-
+            // Surface why the receive loop ended. An `Err` here is the most
+            // common silent teardown cause (a channel handler failed, or the
+            // SSL reader/decrypt thread went away); logging it at warn/error
+            // makes the reason visible even when info-level lifecycle messages
+            // are filtered out.
+            match a {
+                Ok(()) => tracing::warn!("Android Auto receive loop ended cleanly"),
+                Err(e) => tracing::error!("Android Auto receive loop ended with error: {:?}", e),
+            }
         }
         _ = kill.1 => {
-
+            tracing::warn!("Android Auto connection killed by message-sender task");
         }
         _ = ping_watchdog.1 => {
             tracing::error!("Ping watchdog fired; closing android auto connection");
@@ -2045,7 +2074,15 @@ async fn do_android_auto_loop<T: AndroidAutoMainTrait + ?Sized>(
             match f {
                 SslThreadResponse::Data(f) => {
                     if let Some(handler) = channel_handlers.get(f.header.channel_id as usize) {
-                        handler.receive_data(f, sr, &config, main.as_ref()).await?;
+                        let chan = f.header.channel_id;
+                        if let Err(e) = handler.receive_data(f, sr, &config, main.as_ref()).await {
+                            tracing::error!(
+                                "Channel {} handler failed; tearing down session: {:?}",
+                                chan,
+                                e
+                            );
+                            return Err(e.into());
+                        }
                     } else {
                         panic!("Unknown channel id: {:?}", f.header.channel_id);
                     }

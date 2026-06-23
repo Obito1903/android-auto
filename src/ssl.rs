@@ -38,6 +38,10 @@ struct SslStreamThread<U: AsyncWrite + Unpin> {
     hs: Option<tokio::sync::mpsc::Receiver<SslThreadData>>,
     dout: tokio::sync::mpsc::UnboundedSender<SslThreadResponse>,
     write: U,
+    /// Number of encrypted frames successfully decrypted since the handshake
+    /// completed. Logged on a fatal decrypt failure to show how far the
+    /// post-handshake stream got before the TLS state desynced.
+    decrypted_since_hs: u64,
 }
 
 impl<U: AsyncWrite + Unpin> SslStreamThread<U> {
@@ -54,6 +58,7 @@ impl<U: AsyncWrite + Unpin> SslStreamThread<U> {
             hs: Some(rcv),
             dout,
             write,
+            decrypted_since_hs: 0,
         }
     }
 
@@ -122,8 +127,29 @@ impl<U: AsyncWrite + Unpin> SslStreamThread<U> {
                         );
                         return Ok(());
                     }
-                    tracing::error!("Error receiving frame: {:?}", e);
+                    // Post-handshake decrypt failure: the TLS record stream has
+                    // desynced (AEAD tag mismatch) and cannot recover on this
+                    // connection. Dump the offending frame and how far we got so
+                    // the failure can be pinpointed on the next reproduction.
+                    let cap_head = data.data.len().min(48);
+                    let tail_start = data.data.len().saturating_sub(16);
+                    tracing::error!(
+                        "Fatal decrypt error after handshake: {:?} \
+                         (decrypted {} frames since handshake; \
+                         frame channel={} type={:?} enc={} len={} head={:02x?} tail={:02x?})",
+                        e,
+                        self.decrypted_since_hs,
+                        data.header.channel_id,
+                        data.header.frame.get_frame_type(),
+                        data.header.frame.get_encryption(),
+                        data.data.len(),
+                        &data.data[..cap_head],
+                        &data.data[tail_start..],
+                    );
                     return Err(format!("frame error {:?}", e));
+                }
+                if self.hs_completed {
+                    self.decrypted_since_hs += 1;
                 }
                 let _ = self.dout.send(SslThreadResponse::Data(data));
             }

@@ -119,6 +119,70 @@ pub fn is_android_device(info: &nusb::DeviceInfo) -> bool {
     false
 }
 
+/// True if the device descriptor identifies a phone that is already in
+/// Android Open Accessory mode (the Google AOA vendor id with one of the two
+/// accessory product ids).
+pub fn is_in_accessory_mode(info: &nusb::DeviceInfo) -> bool {
+    info.vendor_id() == 0x18D1 && matches!(info.product_id(), 0x2D00 | 0x2D01)
+}
+
+/// Reset any USB device currently sitting in AOA accessory mode.
+///
+/// When the head unit process restarts (e.g. after a UI crash) without the
+/// phone being physically unplugged, the USB accessory link stays up and the
+/// phone keeps its previous Android Auto session alive. The fresh process then
+/// inherits a half-dead session: the phone keeps emitting stale encrypted
+/// frames that the new TLS connection cannot decrypt, so the handshake never
+/// recovers and the only manual cure is to unplug and replug the cable.
+///
+/// Issuing a USB bus reset re-enumerates the device, which the phone detects as
+/// a re-attach and uses to tear down and restart Android Auto cleanly — the
+/// programmatic equivalent of that replug. A freshly connected phone is not yet
+/// in accessory mode, so this only fires for an inherited/stale session and
+/// adds no penalty to the normal first-connect path.
+///
+/// This is intentionally opt-in (`reset_stale_accessory`): on some stricter
+/// xHCI controllers (notably the Tegra `70090000.xusb` on the Nintendo Switch)
+/// a reset leaves the AOA bulk pipe / data-toggle state inconsistent and breaks
+/// the handshake, so those deployments disable it.
+///
+/// Returns `true` if at least one accessory was reset (the caller should then
+/// give the bus a moment to re-enumerate before scanning again).
+pub async fn reset_stale_accessories() -> bool {
+    let devs = match nusb::list_devices().await {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!("Could not list USB devices to reset stale accessories: {e}");
+            return false;
+        }
+    };
+    let mut any = false;
+    for di in devs {
+        if !is_in_accessory_mode(&di) {
+            continue;
+        }
+        tracing::warn!(
+            "USB device already in AOA accessory mode at startup ({:?}); resetting it to \
+             clear any stale Android Auto session inherited from a previous run",
+            di
+        );
+        match di.open().await {
+            Ok(dev) => match dev.reset().await {
+                Ok(()) => {
+                    tracing::info!(
+                        "Issued USB reset on stale accessory; the phone should restart \
+                         Android Auto cleanly"
+                    );
+                    any = true;
+                }
+                Err(e) => tracing::warn!("USB reset on stale accessory failed: {e:?}"),
+            },
+            Err(e) => tracing::warn!("Could not open stale accessory to reset it: {e:?}"),
+        }
+    }
+    any
+}
+
 /// if possible, get the aoa protocol number from the device
 pub async fn get_aoa_protocol(dev: &nusb::Device) -> Option<u16> {
     let result = dev
