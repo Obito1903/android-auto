@@ -6,6 +6,9 @@ enum MessageId {
   BLUETOOTH_SOCKET_INFO_REQUEST = 1;
   BLUETOOTH_NETWORK_INFO_REQUEST = 2;
   BLUETOOTH_NETWORK_INFO_MESSAGE = 3;
+  BLUETOOTH_WIFI_VERSION_REQUEST = 4;
+  BLUETOOTH_WIFI_VERSION_RESPONSE = 5;
+  BLUETOOTH_WIFI_CONNECT_STATUS = 6;
   BLUETOOTH_SOCKET_INFO_RESPONSE = 7;
 }
 
@@ -63,4 +66,12 @@ message SocketInfoResponse
     optional string ip_address = 1;
     optional int32 port = 2;
     required Status status = 3;
+}
+
+// Sent unsolicited by the phone while it tries to join the head unit's access
+// point and reach the projection socket. `status` is kept as an int32 so an
+// unrecognised code still parses instead of failing a `required` enum field.
+message ConnectStatus
+{
+    optional int32 status = 1;
 }

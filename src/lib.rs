@@ -1655,32 +1655,62 @@ async fn handle_bluetooth_client(
     network2: &NetworkInformation,
 ) -> Result<(), String> {
     tracing::info!("Got a bluetooth client");
+    tracing::info!(
+        "Advertising wireless Android Auto: ssid={:?} bssid={:?} security={:?} ap_type={:?} \
+         projection endpoint={}:{}",
+        network2.ssid,
+        network2.mac_addr,
+        network2.security_mode,
+        network2.ap_type,
+        network2.ip,
+        network2.port
+    );
 
-    // Send the Wi-Fi credentials (SSID/PSK/BSSID/security) up front. Modern
-    // Android Auto clients (e.g. recent Pixels) do not send a
-    // `BLUETOOTH_NETWORK_INFO_REQUEST` before connecting; they expect the head
-    // unit to advertise the network proactively. Waiting to be asked leaves the
-    // phone without credentials, so it ACKs the socket request with
-    // STATUS_SUCCESS but never associates with the access point. The phone
-    // still works if it does ask later — the request branch below resends this.
-    let mut net = Bluetooth::NetworkInfo::new();
-    net.set_ssid(network2.ssid.clone());
-    net.set_psk(network2.psk.clone());
-    net.set_mac_addr(network2.mac_addr.clone());
-    net.set_security_mode(network2.security_mode);
-    net.set_ap_type(network2.ap_type);
-    let net = AndroidAutoBluetoothMessage::NetworkInfoMessage(net);
-    let net: AndroidAutoRawBluetoothMessage = net.as_message();
-    let net_data: Vec<u8> = net.into();
-    stream.write_all(&net_data).await.map_err(|e| e.to_string())?;
+    /// Serialise the Wi-Fi credentials (SSID/PSK/BSSID/security) for the phone.
+    fn network_info_frame(network: &NetworkInformation) -> Vec<u8> {
+        let mut net = Bluetooth::NetworkInfo::new();
+        net.set_ssid(network.ssid.clone());
+        net.set_psk(network.psk.clone());
+        net.set_mac_addr(network.mac_addr.clone());
+        net.set_security_mode(network.security_mode);
+        net.set_ap_type(network.ap_type);
+        AndroidAutoBluetoothMessage::NetworkInfoMessage(net)
+            .as_message()
+            .into()
+    }
 
-    let mut s = Bluetooth::SocketInfoRequest::new();
-    s.set_ip_address(network2.ip.clone());
-    s.set_port(network2.port as u32);
-    let m1 = AndroidAutoBluetoothMessage::SocketInfoRequest(s);
-    let m: AndroidAutoRawBluetoothMessage = m1.as_message();
-    let mdata: Vec<u8> = m.into();
-    stream.write_all(&mdata).await.map_err(|e| e.to_string())?;
+    /// Serialise the address the phone should open the projection socket to.
+    fn socket_info_frame(network: &NetworkInformation) -> Vec<u8> {
+        let mut s = Bluetooth::SocketInfoRequest::new();
+        s.set_ip_address(network.ip.clone());
+        s.set_port(network.port as u32);
+        AndroidAutoBluetoothMessage::SocketInfoRequest(s)
+            .as_message()
+            .into()
+    }
+
+    // Send the Wi-Fi credentials up front. Modern Android Auto clients (e.g.
+    // recent Pixels) do not send a `BLUETOOTH_NETWORK_INFO_REQUEST` before
+    // connecting; they expect the head unit to advertise the network
+    // proactively. Waiting to be asked leaves the phone without credentials, so
+    // it ACKs the socket request with STATUS_SUCCESS but never associates with
+    // the access point. The phone still works if it does ask later — the
+    // request branch below resends this.
+    stream
+        .write_all(&network_info_frame(network2))
+        .await
+        .map_err(|e| e.to_string())?;
+
+    stream
+        .write_all(&socket_info_frame(network2))
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // The phone reports progress asynchronously via BLUETOOTH_WIFI_CONNECT_STATUS
+    // while it joins the AP. A failure there usually just means it had not
+    // associated yet when it tried the projection socket, so re-advertise the
+    // network and endpoint a few times before giving up.
+    let mut connect_retries = 0u32;
     loop {
         let mut ty = [0u8; 2];
         let mut len = [0u8; 2];
@@ -1707,17 +1737,39 @@ async fn handle_bluetooth_client(
                     break;
                 }
                 Bluetooth::MessageId::BLUETOOTH_NETWORK_INFO_REQUEST => {
-                    let mut response = Bluetooth::NetworkInfo::new();
                     tracing::debug!("Network info for bluetooth response: {:?}", network2);
-                    response.set_ssid(network2.ssid.clone());
-                    response.set_psk(network2.psk.clone());
-                    response.set_mac_addr(network2.mac_addr.clone());
-                    response.set_security_mode(network2.security_mode);
-                    response.set_ap_type(network2.ap_type);
-                    let response = AndroidAutoBluetoothMessage::NetworkInfoMessage(response);
-                    let m: AndroidAutoRawBluetoothMessage = response.as_message();
-                    let mdata: Vec<u8> = m.into();
-                    let _ = stream.write_all(&mdata).await;
+                    let _ = stream.write_all(&network_info_frame(network2)).await;
+                }
+                Bluetooth::MessageId::BLUETOOTH_WIFI_CONNECT_STATUS => {
+                    let status = Bluetooth::ConnectStatus::parse_from_bytes(&message)
+                        .map(|m| m.status())
+                        .unwrap_or_default();
+                    let named = Status::from_i32(status);
+                    if status == Status::STATUS_SUCCESS as i32 {
+                        tracing::info!("Phone joined the Android Auto access point");
+                    } else if connect_retries < BT_CONNECT_STATUS_RETRIES {
+                        connect_retries += 1;
+                        tracing::warn!(
+                            "Phone reported wifi connect status {} ({:?}); re-advertising \
+                             {}:{} (attempt {}/{})",
+                            status,
+                            named,
+                            network2.ip,
+                            network2.port,
+                            connect_retries,
+                            BT_CONNECT_STATUS_RETRIES
+                        );
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        let _ = stream.write_all(&network_info_frame(network2)).await;
+                        let _ = stream.write_all(&socket_info_frame(network2)).await;
+                    } else {
+                        return Err(format!(
+                            "Phone could not reach the head unit at {}:{} (wifi connect \
+                             status {} {:?}); check that the AP is up on 5 GHz, that the \
+                             phone associated, and that the projection port is listening",
+                            network2.ip, network2.port, status, named
+                        ));
+                    }
                 }
                 Bluetooth::MessageId::BLUETOOTH_SOCKET_INFO_RESPONSE => {
                     let message = Bluetooth::SocketInfoResponse::parse_from_bytes(&message);
@@ -1728,7 +1780,9 @@ async fn handle_bluetooth_client(
                         }
                     }
                 }
-                _ => {}
+                other => {
+                    tracing::warn!("Unhandled bluetooth message {:?}: {:x?}", other, message);
+                }
             },
             _ => {
                 tracing::warn!("Unknown bluetooth packet {} {:x?}", ty, message);
@@ -1744,6 +1798,11 @@ async fn handle_bluetooth_client(
 /// Maximum time allowed for the Bluetooth socket/network negotiation with a
 /// phone before the client is dropped.
 const BT_NEGOTIATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[cfg(feature = "wireless")]
+/// How many times a failing `BLUETOOTH_WIFI_CONNECT_STATUS` is answered by
+/// re-advertising the network and projection endpoint before giving up.
+const BT_CONNECT_STATUS_RETRIES: u32 = 4;
 
 #[cfg(feature = "wireless")]
 /// Runs the bluetooth service that allows wireless android auto connections to start up
