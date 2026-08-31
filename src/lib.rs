@@ -1689,27 +1689,30 @@ async fn handle_bluetooth_client(
             .into()
     }
 
-    // Send the Wi-Fi credentials up front. Modern Android Auto clients (e.g.
-    // recent Pixels) do not send a `BLUETOOTH_NETWORK_INFO_REQUEST` before
-    // connecting; they expect the head unit to advertise the network
-    // proactively. Waiting to be asked leaves the phone without credentials, so
-    // it ACKs the socket request with STATUS_SUCCESS but never associates with
-    // the access point. The phone still works if it does ask later — the
-    // request branch below resends this.
+    // Order matters. The head unit opens with WIFI_START_REQUEST (the socket
+    // info); the phone then asks for credentials with
+    // BLUETOOTH_NETWORK_INFO_REQUEST and only afterwards joins the AP. Sending
+    // the credentials first makes the phone reject the start request outright
+    // with STATUS_INVALID_HOST (within milliseconds, before it ever touches the
+    // radio).
     stream
-        .write_all(&network_info_frame(network2))
+        .write_all(&socket_info_frame(network2))
         .await
         .map_err(|e| e.to_string())?;
 
+    // Some clients (e.g. recent Pixels) never send the credentials request and
+    // expect the network to be advertised proactively, so push it right after
+    // the start request as well. The request branch below resends it for the
+    // clients that do ask.
     stream
-        .write_all(&socket_info_frame(network2))
+        .write_all(&network_info_frame(network2))
         .await
         .map_err(|e| e.to_string())?;
 
     // The phone reports progress asynchronously via BLUETOOTH_WIFI_CONNECT_STATUS
     // while it joins the AP. A failure there usually just means it had not
     // associated yet when it tried the projection socket, so re-advertise the
-    // network and endpoint a few times before giving up.
+    // endpoint a few times before giving up.
     let mut connect_retries = 0u32;
     loop {
         let mut ty = [0u8; 2];
@@ -1730,6 +1733,13 @@ async fn handle_bluetooth_client(
             .await
             .map_err(|e| e.to_string())?;
         use protobuf::Enum;
+        tracing::debug!(
+            "Bluetooth frame in: id={} ({:?}) len={} {:02x?}",
+            ty,
+            Bluetooth::MessageId::from_i32(ty as i32),
+            len,
+            message
+        );
         match Bluetooth::MessageId::from_i32(ty as i32) {
             Some(m) => match m {
                 Bluetooth::MessageId::BLUETOOTH_SOCKET_INFO_REQUEST => {
@@ -1760,7 +1770,6 @@ async fn handle_bluetooth_client(
                             BT_CONNECT_STATUS_RETRIES
                         );
                         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                        let _ = stream.write_all(&network_info_frame(network2)).await;
                         let _ = stream.write_all(&socket_info_frame(network2)).await;
                     } else {
                         return Err(format!(
