@@ -1223,8 +1223,6 @@ struct AndroidAutoFrameReceiver {
     len: Option<u16>,
     /// The data for the current frame
     current_frame: Vec<u8>,
-    /// The data received so far for a multi-frame packet
-    rx_sofar: Vec<Vec<u8>>,
 }
 
 impl AndroidAutoFrameReceiver {
@@ -1234,10 +1232,13 @@ impl AndroidAutoFrameReceiver {
             chunk_length: Vec::new(),
             len: None,
             current_frame: Vec::new(),
-            rx_sofar: Vec::new(),
         }
     }
 
+    /// Read one frame off the wire. Fragments of a multi-frame message are
+    /// returned individually: each fragment carries its own TLS record, so they
+    /// must reach the decryptor in wire order. Reassembly happens on the
+    /// plaintext side, in [`FrameAssembler`].
     async fn read<T: tokio::io::AsyncRead + Unpin>(
         &mut self,
         header: &FrameHeader,
@@ -1281,33 +1282,59 @@ impl AndroidAutoFrameReceiver {
                     std::io::ErrorKind::UnexpectedEof => FrameReceiptError::Disconnected,
                     _ => FrameReceiptError::UnexpectedDuringFrameContents(e),
                 })?;
-            let data = if header.frame.get_frame_type() == FrameHeaderType::Single {
-                let d = data_frame.clone();
-                self.len.take();
-                Some(vec![d])
-            } else {
-                self.rx_sofar.push(data_frame);
-                if header.frame.get_frame_type() == FrameHeaderType::Last {
-                    let d = self.rx_sofar.clone();
-                    self.rx_sofar.clear();
-                    self.len.take();
-                    Some(d)
-                } else {
-                    self.len.take();
-                    None
-                }
-            };
-            if let Some(data) = data {
-                let data: Vec<u8> = data.into_iter().flatten().collect();
-                let f = AndroidAutoFrame {
-                    header: *header,
-                    data,
-                };
-                let f = Some(f);
-                return Ok(f);
-            }
+            self.len.take();
+            return Ok(Some(AndroidAutoFrame {
+                header: *header,
+                data: data_frame,
+            }));
         }
         Ok(None)
+    }
+}
+
+/// Reassembles multi-frame messages from their fragments, per channel.
+///
+/// Fragments are tracked per channel because the peer interleaves frames from
+/// different channels between the `First` and `Last` of a fragmented message.
+#[derive(Default)]
+struct FrameAssembler {
+    /// Payload accumulated so far for each channel with a message in progress.
+    partial: std::collections::HashMap<ChannelId, Vec<u8>>,
+}
+
+impl FrameAssembler {
+    /// Feed a frame in. Returns the complete message once its final fragment
+    /// has arrived, or `None` while a multi-frame message is still incomplete.
+    fn push(&mut self, mut frame: AndroidAutoFrame) -> Option<AndroidAutoFrame> {
+        let channel = frame.header.channel_id;
+        match frame.header.frame.get_frame_type() {
+            FrameHeaderType::Single => Some(frame),
+            FrameHeaderType::First => {
+                self.partial.insert(channel, std::mem::take(&mut frame.data));
+                None
+            }
+            FrameHeaderType::Middle => {
+                match self.partial.get_mut(&channel) {
+                    Some(buf) => buf.append(&mut frame.data),
+                    None => tracing::warn!(
+                        "Dropping middle fragment on channel {channel} with no preceding first"
+                    ),
+                }
+                None
+            }
+            FrameHeaderType::Last => {
+                let Some(mut data) = self.partial.remove(&channel) else {
+                    tracing::warn!(
+                        "Dropping last fragment on channel {channel} with no preceding first"
+                    );
+                    return None;
+                };
+                data.append(&mut frame.data);
+                frame.data = data;
+                frame.header.frame.set_frame_type(FrameHeaderType::Single);
+                Some(frame)
+            }
+        }
     }
 }
 

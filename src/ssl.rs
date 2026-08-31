@@ -3,8 +3,8 @@
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::{
-    AndroidAutoControlMessage, AndroidAutoFrame, AndroidAutoFrameReceiver, FrameHeaderReceiver,
-    FrameReceiptError, FrameTransmissionError, SendableAndroidAutoMessage,
+    AndroidAutoControlMessage, AndroidAutoFrame, AndroidAutoFrameReceiver, FrameAssembler,
+    FrameHeaderReceiver, FrameReceiptError, FrameTransmissionError, SendableAndroidAutoMessage,
 };
 
 /// A message sent to the ssl thread
@@ -42,6 +42,8 @@ struct SslStreamThread<U: AsyncWrite + Unpin> {
     /// completed. Logged on a fatal decrypt failure to show how far the
     /// post-handshake stream got before the TLS state desynced.
     decrypted_since_hs: u64,
+    /// Rebuilds multi-frame messages from the decrypted fragments.
+    assembler: FrameAssembler,
 }
 
 impl<U: AsyncWrite + Unpin> SslStreamThread<U> {
@@ -59,6 +61,7 @@ impl<U: AsyncWrite + Unpin> SslStreamThread<U> {
             dout,
             write,
             decrypted_since_hs: 0,
+            assembler: FrameAssembler::default(),
         }
     }
 
@@ -151,7 +154,9 @@ impl<U: AsyncWrite + Unpin> SslStreamThread<U> {
                 if self.hs_completed {
                     self.decrypted_since_hs += 1;
                 }
-                let _ = self.dout.send(SslThreadResponse::Data(data));
+                if let Some(frame) = self.assembler.push(data) {
+                    let _ = self.dout.send(SslThreadResponse::Data(frame));
+                }
             }
             SslThreadData::HandshakeStart => {
                 if self.hs_started {
@@ -335,12 +340,17 @@ impl StreamMux {
         let chan_ssl = chan.0.clone();
         tokio::spawn(async move {
             let mut fr = AndroidAutoFrameReceiver::new();
+            let mut plain_assembler = FrameAssembler::default();
             loop {
                 let mut fhr = FrameHeaderReceiver::new();
                 match fhr.read(&mut read).await {
                     Ok(Some(fh)) => match fr.read(&fh, &mut read).await {
                         Ok(Some(f)) => {
                             if f.header.frame.get_encryption() {
+                                // Fragments must reach the decryptor in wire
+                                // order: each one is a separate TLS record, so
+                                // holding some back to reassemble first would
+                                // desync the AEAD sequence.
                                 let _ = chan_ssl.send(SslThreadData::DecryptMe(f)).await;
                             } else {
                                 // Plaintext control-channel traffic carries the
@@ -355,7 +365,9 @@ impl StreamMux {
                                         &f.data[..cap]
                                     );
                                 }
-                                let _ = chanw.send(SslThreadResponse::Data(f));
+                                if let Some(f) = plain_assembler.push(f) {
+                                    let _ = chanw.send(SslThreadResponse::Data(f));
+                                }
                             }
                         }
                         Ok(None) => {}
